@@ -2,7 +2,6 @@ import socket
 import sys
 import json
 from pylsl import StreamInfo, StreamOutlet, local_clock, vectord
-import numbers
 
 DEFAULT_HOST = ""
 DEFAULT_PORT = 5555
@@ -23,9 +22,6 @@ class MLServer:
         self.stream_info = None
         self.outlet = None
         self.previous_channel_count = 0
-        self.string_stream_info = None
-        self.string_outlet = None
-        self.previous_string_channel_count = 0
 
     def setup_socket(self):
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -56,120 +52,70 @@ class MLServer:
     def push_empty_event_to_outlet(self , event_time):
         if (self.previous_channel_count > 0):
             if self.outlet is not None:
-                values = [0] * self.previous_channel_count
+                values = ["0"] * self.previous_channel_count
                 self.outlet.push_sample(vectord(values), event_time, True)
 
 
 
-    def create_stream(self,fields,type):
+    def create_stream(self,fields):
         channel_count = len( fields )
 
-        if( type == 'numeric' ):
-            stream_info = StreamInfo(STREAM_NAME, CONTENT_TYPE, channel_count , SAMPLING_RATE, 'float32', DEVICE_ID)
-        else:
-            stream_info = StreamInfo("String stream: "+STREAM_NAME , CONTENT_TYPE, channel_count , SAMPLING_RATE, 'string', DEVICE_ID + "string")
+        stream_info = StreamInfo(STREAM_NAME , CONTENT_TYPE, channel_count , SAMPLING_RATE, 'string', DEVICE_ID)
 
         ml_channels = stream_info.desc().append_child('channels')
 
         for index in fields.keys():
             ch = ml_channels.append_child('channel')
             ch.append_child_value('label', index)
-            if( type == 'numeric' ):
-                ch.append_child_value('unit', 'pixels')
-            else:
-                ch.append_child_value('unit', 'string')
+            ch.append_child_value('unit', 'string')
             ch.append_child_value('type', 'live_event')
 
         outlet = StreamOutlet(stream_info)
 
-        if(type == 'numeric'):
-            self.destroy_numeric_stream()
+        self.destroy_previous_stream()
 
-            self.stream_info = stream_info
-            self.outlet = outlet
-            self.previous_channel_count = channel_count
-        else:
-            self.destroy_string_stream()
+        self.stream_info = stream_info
+        self.outlet = outlet
+        self.previous_channel_count = channel_count
 
-            self.string_stream_info = stream_info
-            self.string_outlet = outlet
-            self.previous_string_channel_count = channel_count
-
-        print('LSL Stream setup complete channelCount: ' + str(channel_count) + ", type: " + type )
+        print('LSL Stream setup complete channelCount: ' + str(channel_count))
 
 
     def handle_streams( self, data ):
-        numeric_fields = {key: value for key, value in data.items() if isinstance(data[key] , numbers.Number ) or isinstance(data[key][0] , numbers.Number )}
         channel_count = len( data )
 
         if ( channel_count < 1 ):
             return
 
-        self.create_stream(numeric_fields,'numeric')
+        self.create_stream( data )
 
-        string_fields = None
-        if ( len( numeric_fields ) != channel_count ):
-            string_fields = {key: value for key, value in data.items() if not isinstance(data[key] , numbers.Number )}
-
-        if string_fields is not None:
-            self.create_stream(string_fields,'string')
-        else:
-            self.destroy_string_stream()
-
-    def destroy_string_stream(self):
-        try:
-            if self.string_outlet is not None:
-                del self.string_stream_info
-                del self.string_outlet
-            self.previous_string_channel_count = 0
-        except Exception as e:
-            print("An error occurred while destroying string_stream:", str(e))
-
-    def destroy_numeric_stream(self):
+    def destroy_previous_stream(self):
         try:
             if self.outlet is not None:
                 del self.stream_info
                 del self.outlet
             self.previous_channel_count = 0
         except Exception as e:
-            print("An error occurred while destroying numeric_stream:", str(e))
+            print("An error occurred while destroying a stream:", str(e))
 
-    def push_event_to_numeric_outlet(self,data , event_time):
-        numeric_fields = {key: value for key, value in data.items() if isinstance(data[key] , numbers.Number ) or isinstance(data[key][0] , numbers.Number )}
-        numeric_values = []
-
-        for index in numeric_fields.keys():
-            if ( isinstance(numeric_fields[index], numbers.Number)):
-                numeric_values.append(numeric_fields[index])
-            else:
-                numeric_values.append(numeric_fields[index][0])
-
-        print(numeric_values,self.previous_channel_count,'pushing number event')
-        try:
-            if ( len(numeric_fields) > 0 and len(numeric_values) == self.previous_channel_count):
-                self.outlet.push_sample(vectord(numeric_values), event_time, True)
-            else:
-                self.handle_streams( data )
-                self.push_event_to_numeric_outlet( data , event_time )
-        except Exception as e:
-            print(str(e))
-
-    def push_event_to_string_outlet(self,data , event_time):
-        string_fields = {key: value for key, value in data.items() if not isinstance(data[key] , numbers.Number )}
+    def push_event(self,data,event_time):
         string_values = []
 
-        for index in string_fields.keys():
-            if ( isinstance(string_fields[index], str)):
-                string_values.append(string_fields[index])
+        for index in data.keys():
+            value = data[index]
+            if ( isinstance( value , str)):
+                string_values.append( value )
+            elif ( hasattr( value , "__len__" ) ):
+                string_values.append( str( value[ 0 ] ) )
             else:
-                string_values.append(str(string_fields[index]))
+                string_values.append( str( value ) )
 
-        print(string_values,self.previous_string_channel_count,'pushing string event')
-        if( len(string_fields) > 0 ):
+        print( string_values , self.previous_channel_count , 'pushing event' )
+        if( len( string_values ) > 0 ):
             try:
-                self.string_outlet.push_sample(vectord(string_values), event_time, True)
+                self.outlet.push_sample( vectord( string_values ), event_time, True)
             except Exception as e:
-                print(str(e))
+                print( str(e))
 
     def process_event(self, event,event_time):
         try:
@@ -180,14 +126,13 @@ class MLServer:
                 return
 
             current_channel_count = len( data )
-            if ( self.previous_channel_count + self.previous_string_channel_count != current_channel_count ):
+            if ( self.previous_channel_count != current_channel_count ):
                 self.handle_streams( data )
 
             log_values = [data[k] for k in data.keys()]
             self.log_event(log_values)
 
-            self.push_event_to_numeric_outlet( data , event_time )
-            self.push_event_to_string_outlet( data , event_time )
+            self.push_event( data , event_time )
 
         except json.decoder.JSONDecodeError:
             print('Decoding error')
